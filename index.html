@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0f172a">
+<title>Control LED ESP32</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --text: #f1f5f9;
+    --muted: #94a3b8;
+    --line: #334155;
+    --on: #ef4444;
+    --green: #22c55e;
+    --blue: #3b82f6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    padding: 24px 16px calc(24px + env(safe-area-inset-bottom));
+  }
+  main { width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 20px; }
+  header { text-align: center; }
+  h1 { font-size: 26px; font-weight: 700; }
+  .sub { color: var(--muted); font-size: 14px; margin-top: 4px; }
+
+  .status {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 999px; padding: 10px 16px; font-size: 15px;
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+  .status.ok .dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
+
+  .bulb-wrap {
+    background: var(--card); border: 1px solid var(--line); border-radius: 20px;
+    padding: 28px 16px; display: flex; flex-direction: column; align-items: center; gap: 14px;
+  }
+  .bulb {
+    width: 130px; height: 130px; border-radius: 50%;
+    background: #3f1d1d; border: 4px solid #5b2626;
+    transition: all .3s ease;
+  }
+  .bulb.on {
+    background: radial-gradient(circle at 35% 35%, #fca5a5, var(--on) 60%);
+    border-color: #fecaca;
+    box-shadow: 0 0 40px 10px rgba(239, 68, 68, .55);
+  }
+  .bulb-label { font-size: 18px; font-weight: 600; }
+
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  button {
+    font: inherit; font-size: 17px; font-weight: 600; color: #fff;
+    border: none; border-radius: 14px; padding: 16px; cursor: pointer;
+    transition: transform .1s, opacity .2s;
+  }
+  button:active { transform: scale(.97); }
+  button:disabled { opacity: .35; cursor: not-allowed; }
+  #btnConectar { background: var(--blue); width: 100%; }
+  #btnConectar.desconectar { background: #475569; }
+  #btnOn { background: var(--green); }
+  #btnOff { background: var(--on); }
+
+  .log {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 12px 14px; font-family: ui-monospace, Menlo, monospace; font-size: 13px;
+    color: var(--muted); height: 130px; overflow-y: auto;
+  }
+  .log div { padding: 2px 0; }
+  .aviso {
+    background: #422006; border: 1px solid #a16207; color: #fde68a;
+    border-radius: 14px; padding: 14px; font-size: 14px; line-height: 1.4; display: none;
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Control LED</h1>
+    <p class="sub">ESP32 WROOM-32 · Bluetooth BLE</p>
+  </header>
+
+  <div class="aviso" id="aviso">
+    Este navegador no soporta Web Bluetooth. En iPhone abre esta página con la app
+    <b>Bluefy</b> (App Store). En Android usa Chrome.
+  </div>
+
+  <div class="status" id="status"><span class="dot"></span><span id="statusText">Desconectado</span></div>
+
+  <div class="bulb-wrap">
+    <div class="bulb" id="bulb"></div>
+    <div class="bulb-label" id="bulbLabel">LED apagado</div>
+  </div>
+
+  <button id="btnConectar">Conectar</button>
+
+  <div class="row">
+    <button id="btnOn" disabled>Encender</button>
+    <button id="btnOff" disabled>Apagar</button>
+  </div>
+
+  <div class="log" id="log"></div>
+</main>
+
+<script>
+  // Mismos UUID que el codigo del ESP32 (servicio UART de Nordic)
+  const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+  const RX_UUID      = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // escribir al ESP32
+  const TX_UUID      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // respuestas del ESP32
+
+  let dispositivo = null;
+  let rxChar = null;
+
+  const $ = id => document.getElementById(id);
+
+  function log(texto) {
+    const linea = document.createElement('div');
+    const hora = new Date().toLocaleTimeString();
+    linea.textContent = `[${hora}] ${texto}`;
+    $('log').prepend(linea);
+  }
+
+  function setConectado(si) {
+    $('status').classList.toggle('ok', si);
+    $('statusText').textContent = si ? 'Conectado a ' + dispositivo.name : 'Desconectado';
+    $('btnOn').disabled = !si;
+    $('btnOff').disabled = !si;
+    $('btnConectar').textContent = si ? 'Desconectar' : 'Conectar';
+    $('btnConectar').classList.toggle('desconectar', si);
+  }
+
+  function setLed(encendido) {
+    $('bulb').classList.toggle('on', encendido);
+    $('bulbLabel').textContent = encendido ? 'LED encendido' : 'LED apagado';
+  }
+
+  async function conectar() {
+    try {
+      log('Buscando dispositivos...');
+      dispositivo = await navigator.bluetooth.requestDevice({
+        filters: [{ services: [SERVICE_UUID] }, { namePrefix: 'ESP32_LED' }],
+        optionalServices: [SERVICE_UUID]
+      });
+      dispositivo.addEventListener('gattserverdisconnected', alDesconectar);
+
+      log('Conectando a ' + dispositivo.name + '...');
+      const servidor = await dispositivo.gatt.connect();
+      const servicio = await servidor.getPrimaryService(SERVICE_UUID);
+      rxChar = await servicio.getCharacteristic(RX_UUID);
+      const txChar = await servicio.getCharacteristic(TX_UUID);
+
+      // Escuchar las respuestas del ESP32
+      await txChar.startNotifications();
+      txChar.addEventListener('characteristicvaluechanged', e => {
+        const texto = new TextDecoder().decode(e.target.value);
+        log('ESP32: ' + texto);
+        if (texto.includes('encendido')) setLed(true);
+        if (texto.includes('apagado')) setLed(false);
+      });
+
+      setConectado(true);
+      log('Conectado');
+    } catch (err) {
+      log('Error: ' + err.message);
+    }
+  }
+
+  function alDesconectar() {
+    rxChar = null;
+    setConectado(false);
+    log('Desconectado');
+  }
+
+  async function enviar(comando) {
+    if (!rxChar) return;
+    try {
+      await rxChar.writeValue(new TextEncoder().encode(comando));
+      log('Enviado: ' + comando);
+    } catch (err) {
+      log('Error al enviar: ' + err.message);
+    }
+  }
+
+  $('btnConectar').addEventListener('click', () => {
+    if (dispositivo && dispositivo.gatt.connected) {
+      dispositivo.gatt.disconnect();
+    } else {
+      conectar();
+    }
+  });
+  $('btnOn').addEventListener('click', () => enviar('ON'));
+  $('btnOff').addEventListener('click', () => enviar('OFF'));
+
+  if (!navigator.bluetooth) {
+    $('aviso').style.display = 'block';
+    $('btnConectar').disabled = true;
+  }
+</script>
+</body>
+</html>
